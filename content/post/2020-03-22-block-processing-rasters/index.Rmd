@@ -1,0 +1,189 @@
+---
+title: Taking Control of Block Processing of Rasters
+author: Matt Strimas-Mackey
+date: '2020-03-24'
+slug: 'block-processing-rasters'
+categories: []
+tags:
+  - r
+  - Spatial
+subtitle: ''
+summary: ''
+authors: []
+lastmod: '2020-03-22T10:10:24-04:00'
+featured: no
+image:
+  caption: ''
+  focal_point: ''
+  preview_only: yes
+projects: []
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r here, include=FALSE, eval=FALSE}
+setwd(here::here("content/post/2020-03-22-block-processing-rasters/"))
+```
+
+In [my previous post](post/processing-large-rasters-in-r/), I tried to understand how `raster` package functions like `calc()` process raster data. The package does a good job of abstracting a lot of this detail away from users, data will be processed either on disk or in memory based on criteria related to the size of the raster, the available resources, and user-defined parameters. In addition, if processing is done on disk, the raster will be processed in blocks, the size of which is user controlled. In most cases, `raster` makes sensible choices and the whole process works seamlessly for the user. However, I've found that, for large raster datasets, the specific details of *how* a raster is processed in blocks can make a big difference in terms of computational efficient. Furthermore, with `raster` it's hard to know exactly what's going on behind the scenes and the parameters that we can tune through `rasterOptions()` don't give me as much direct control over the processing as I'd like. In this post, I'm going to try taking lower level control of `raster` processing and explore how choices about block size impact processing speed.
+
+To demonstrate all this, I'm going to use some real data from the [eBird Status & Trends](https://ebird.org/science/status-and-trends/woothr/abundance-map); this is a dataset that I work with on a daily basis in my job. The below code downloads weekly relative abundance for Wood Thrush at 3 km resolution across the entire western hemisphere, subsets the annual data to just the weeks of the breeding season (May 24 - September 7), then saves the results as a GeoTIFF.
+
+```{r data-prep, eval=FALSE}
+library(ebirdst)
+library(raster)
+library(tictoc)
+library(profmem)
+library(tidyverse)
+# download status and trends data
+abd <- get_species_path("woothr") %>% 
+  load_raster("abundance", .)
+# subset to the breeding season
+dts <- parse_raster_dates(abd_wk)
+r <- abd[[which(dts >= as.Date("2018-05-24") & dts <= as.Date("2018-09-07"))]]
+r <- writeRaster(r, "data/woothr.tif", options = "COMPRESS=LZW")
+```
+
+```{r data-load, echo=FALSE}
+library(ebirdst)
+library(raster)
+library(tictoc)
+library(profmem)
+library(tidyverse)
+
+r <- stack("data/woothr.tif")
+```
+
+This is a big dataset, almost 40 million cells and 16 layers, which works out to be just under 5 GB when read into memory, assuming 8 bytes per cell.
+
+```{r data-size}
+print(r)
+# estimate size in gb
+8 * ncell(r) * nlayers(r) / 2^30
+```
+
+What I want to do with this dataset, is simply average across the weeks to produce a single layer of breeding season abundance, which is what we use to generate the seasonal maps on the [Status and Trends website](https://ebird.org/science/status-and-trends/woothr/abundance-map-breeding). As I showed in the previous post, that can be done with `calc()`:
+
+```{r data-calc}
+r_mean <- calc(r, mean, na.rm = TRUE)
+```
+
+```{r echo = FALSE}
+# clean up
+rm(r_mean)
+g <- capture.output(gc())
+removeTmpFiles(h = 0)
+```
+
+This took about 2 minutes to run on my laptop and, given the size, it must have been processed on disk in blocks rather than in memory. Recall that the block size is the number of rows that are read in and processed at a time. The catch is that it's not clear what block size was used and if the automatically chosen block size was optimal. You can use `rasterOptions()` to set `chunksize` in bytes, which indirectly controls the number of rows per block. Throughout this post, I'll use "block size" to refer to the number of rows per block and "chunk size" to refer to the user-defined maximum number of bytes available for each block. If you consult the [source code for `calc()`](https://github.com/rspatial/raster/blob/master/R/calc.R) it's possible to determine that this function splits rasters into blocks using `blockSize()` with `n = 2 * (nlayers(r) + 1)`, then you'd have to look at the [source code for `blockSize()`](https://github.com/rspatial/raster/blob/master/R/blockSize.R) to determine that this is converted to the number of rows per blocks with `floor(chunksize / (8 * n * ncol(r)))`. So, working through all this with the default chunk size used by raster ($10^8$), we get:
+
+```{r data-rows}
+n <- 2 * (nlayers(r) + 1)
+1e8 / (8 * n * ncol(r))
+```
+
+In most cases, you're probably best to just set `chunksize` based on your system's resources and leave the block size choice to `raster`, but for sake of optimizing the processing of the Status & Trends data, I want to know exactly what block size is being used and, ideally, be able to control the block size directly rather than via the chunk size. With this is mind, I forked the [`raster` GitHub repo](https://github.com/rspatial/raster/) and made some modifications.
+
+## A custom `raster` package
+
+After [forking the `raster` package repository](https://github.com/mstrimas/raster) I made the following changes:
+ 
+ 1. `calc()` now displays the block size (i.e. number of rows) being used.
+ 2. `calc(return_blocks = TRUE)` will, instead of processing the raster object, just return the blocks that would have been used.
+ 3. Added a new function, `summarize_raster()`, that is a greatly simplified version of `calc()`. It always process files on disk, will only calculate means and sums rather than a generic input function, always uses `na.rm = TRUE`, and it takes either a `chunksize` argument (in units of available GB of RAM) or an `n_rows` argument that directly controls the number of rows per block.
+
+If you're interested, the source code for the `summarize_raster()` function is [here](https://github.com/mstrimas/raster/blob/master/R/summarize-raster.R). It removes much of the functionality of `calc()` but this comes with the benefit of being easier to figure out what's going on inside the function. If you want to install this version of the `raster` package you could do so with `remotes::install_packages("mstrimas/raster")`, but beware I've modified the original package in a very sloppy way and **you probably don't want to overwrite the real `raster` package with my hacked version.**
+
+## So, what block size *is* being used?
+
+```{r so-calc, message = TRUE}
+tic()
+r_mean_calc <- calc(r, mean, na.rm = TRUE)
+toc()
+```
+
+```{r echo = FALSE}
+default_nrow <- calc(r, mean, na.rm = TRUE, return_blocks = TRUE)$nrows[1]
+g <- capture.output(gc())
+```
+
+In this case, with the default chunk size of $10^8 \approx 0.1 GB$, `calc()` processes this raster in 111 blocks of 51 rows each. We can use my custom `summarize_raster()` function to do the same thing, but specify block size explicitly.
+
+```{r so-custom, message = TRUE}
+tic()
+r_mean_summ <- summarize_raster(r, "mean", n_rows = 51)
+toc()
+```
+
+Turns out `summarize_raster()` is slightly faster because I've slimmed it down and removed some additional checks and functionality. We can confirm that the two approaches produce the same results.
+
+```{r sp-check}
+cellStats(abs(r_mean_calc - r_mean_summ), max)
+```
+
+```{r echo = FALSE}
+rm(r_mean_calc, r_mean_summ)
+g <- capture.output(gc())
+removeTmpFiles(h = 0)
+```
+
+## Run time vs. block size
+
+Ok, now everything's in place, and we can examine how block size impacts processing time. Recall that block size is the number of rows that get read in, summarized, and output at each iteration of the processing. Let's estimate run time for a range of blocks sizes, from 1 row to `r scales::comma(nrow(r))` rows, equivalent to processing the whole raster in memory. Note that I'm running this on a server with over 300 GB of RAM , so I have more than enough resources to process this raster in memory. Since there could be variation in run time, I'll summarize the raster 10 times for each block size.
+
+```{r vs-calc, eval = FALSE}
+# choose the values of n_rows to try
+n_rows <- 2^seq(0, ceiling(log2(nrow(r))))
+n_rows[length(n_rows)] <- nrow(r)
+
+# set up 10 repetitions of each n_rows value
+nrow_grid <- expand_grid(rep = 1:10, n_rows = n_rows)
+
+# summarize raster using each value of n_rows
+summarize_nrows <- function(x) {
+  # memory usage
+  m <- profmem({
+    # timer
+    t <- system.time({
+      r_mean <- summarize_raster(r, "mean", n_rows = x)
+    })
+  })
+  # clean up
+  g <- capture.output(gc())
+  rm(r_mean)
+  return(tibble(elapsed = t["elapsed"], max_mem = max(m$bytes, na.rm = TRUE)))
+}
+time_mem <- nrow_grid %>% 
+  mutate(results = map(n_rows, summarize_nrows))
+```
+
+```{r echo = FALSE}
+time_mem <- read_csv("data/time-mem.csv")
+g <- capture.output(gc())
+removeTmpFiles(h = 0)
+```
+
+Now let's average across the 10 repitions and plot the elapsed time vs. block size curve.
+
+```{r vs-plot, fig.asp = 1}
+ggplot(time_mem) +
+  aes(x = n_rows, y = elapsed / 60) +
+  geom_line() +
+  geom_point() +
+  geom_vline(xintercept = default_nrow,
+             color = "orange",
+             size = 1.2,
+             linetype = "dashed") +
+  scale_x_continuous(trans = "log2") +
+  labs(x = "# of rows/block size (log2 scale)", 
+       y = "Elapsed time (minutes)",
+       title = "Processing time decreases exponentially with block size",
+       subtitle = "Default block size (orange) is not optimally using resources")
+ggplot(rows_vs_time) +
+  aes(x = n_rows, y = max_mem / 2^30) +
+  geom_line() +
+  geom_point() +
+  labs(x = "# of rows", y = "Maximum memory used (GB)",
+       title = "")
+```
+

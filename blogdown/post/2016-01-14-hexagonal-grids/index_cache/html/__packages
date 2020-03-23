@@ -1,0 +1,14 @@
+base
+dplyr
+tidyr
+sp
+raster
+rgeos
+rgbif
+viridisLite
+viridis
+gridExtra
+lattice
+latticeExtra
+rasterVis
+blogdown

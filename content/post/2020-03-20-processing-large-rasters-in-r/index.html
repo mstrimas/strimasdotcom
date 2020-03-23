@@ -1,0 +1,249 @@
+---
+title: Processing Large Rasters in R
+author: Matt Strimas-Mackey
+date: '2020-03-20'
+slug: 'processing-large-rasters-in-r'
+categories: []
+tags:
+  - R
+  - Spatial
+subtitle: ''
+summary: 'Investigating how raster data are processed in R to improve the efficiency of processing large raster files.'
+authors: []
+lastmod: '2020-03-20T15:57:29-04:00'
+featured: no
+image:
+  caption: ''
+  focal_point: ''
+  preview_only: yes
+projects: []
+editor_options: 
+  chunk_output_type: console
+---
+
+
+
+<p>We work with a lot of huge raster datasets on the <a href="https://ebird.org/science/">eBird Status &amp; Trends</a> project, and processing them is becoming a real bottleneck in our R workflow. For example, we make weekly estimates of bird abundance at 3 km resolution across the entire Western Hemisphere, which results in raster stacks with billions of cells! To produce seasonal abundance maps, we need to average the weekly layers across all weeks within each season using the <code>raster</code> function <code>calc()</code>, and it takes forever with these huge files! In this post, I’m going to try to understand how <code>raster</code> processes data and explore how this can be tweaked to improve computational efficiency.</p>
+<p>In general, R holds objects in memory, which results in a limit to the size of objects that can be processed. This poses a problem for processing raster datasets, which can be much larger than the available system memory. The <code>raster</code> package addresses this by only storing references to raster files within its <code>Raster*</code> objects. Depending on the memory requirements for a given raster calculation, and the memory available, the package functions will either read the whole dataset into R for processing or process it in smaller chunks.</p>
+<p>Let’s start by importing an example dataset generated using the <code>simulate_species()</code> function from the <code>prioritizr</code> package. The raster has dimensions 1000x1000 and 9 layers.</p>
+<pre class="r"><code>library(raster)
+library(rasterVis)
+library(viridis)
+library(profmem)
+library(tidyverse)
+
+r &lt;- stack(&quot;data/large-raster.tif&quot;)
+print(r)
+#&gt; class      : RasterStack 
+#&gt; dimensions : 1000, 1000, 1e+06, 9  (nrow, ncol, ncell, nlayers)
+#&gt; resolution : 0.001, 0.001  (x, y)
+#&gt; extent     : 0, 1, 0, 1  (xmin, xmax, ymin, ymax)
+#&gt; crs        : +proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0 
+#&gt; names      : large.raster.1, large.raster.2, large.raster.3, large.raster.4, large.raster.5, large.raster.6, large.raster.7, large.raster.8, large.raster.9 
+#&gt; min values :              0,              0,              0,              0,              0,              0,              0,              0,              0 
+#&gt; max values :          0.885,          0.860,          0.583,          0.744,          0.769,          0.428,          0.289,          0.579,          0.499
+levelplot(r,
+          col.regions = viridis,
+          xlab = NULL, ylab = NULL,
+          scales = list(draw = FALSE),
+          names.attr = paste(&quot;Band&quot;, seq_len(nlayers(r))),
+          maxpixels = 1e6)</code></pre>
+<p><img src="/post/2020-03-20-processing-large-rasters-in-r/index_files/figure-html/read-1.png" width="\textwidth" style="display: block; margin: auto;" /></p>
+<p>We can calculate the total number of values this raster can store and the associated memory requirements assuming 8 bytes per cell value. To calculate the actual memory used, we can override the default <code>raster</code> behavior and read the contents of the file into R using <code>readAll()</code>.</p>
+<pre class="r"><code>n_values &lt;- ncell(r) * nlayers(r)
+# memory in mb
+mem_est &lt;- 8 * n_values / 2^20
+mem_act &lt;- as.integer(object.size(readAll(r))) / 2^20
+#&gt; [1] &quot;# values in raster:  9,000,000&quot;
+#&gt; [1] &quot;Estimated size (MB):  68.7&quot;
+#&gt; [1] &quot;Memory usage (MB):  68.8&quot;</code></pre>
+<p>So we were fairly close in our estimates, looks like it takes a little under 70 Mb of memory to hold this object in the R session.</p>
+<div id="processing-rasters" class="section level2">
+<h2>Processing rasters</h2>
+<p>Let’s apply the <code>calc()</code> function to this dataset to calculate the cell-wise mean across layers.</p>
+<pre class="r"><code>r_mean &lt;- calc(r, mean, na.rm = TRUE)</code></pre>
+<p>This is essentially to equivalent of <code>apply()</code> for a array with 3 dimensions, e.g.:</p>
+<pre class="r"><code>a &lt;- array(runif(27), dim = c(3, 3, 3))
+apply(a, 1:2, mean)
+#&gt;       [,1]  [,2]  [,3]
+#&gt; [1,] 0.236 0.602 0.570
+#&gt; [2,] 0.452 0.412 0.588
+#&gt; [3,] 0.561 0.598 0.545</code></pre>
+<p>But what <code>raster</code> is doing in <code>calc()</code> is a little different and depends on the memory requirements of the calculation. We can use the function <code>canProccessInMemory()</code> to test whether a <code>Raster*</code> object can be loaded into memory for processing or not. We’ll use <code>verbose = TRUE</code> to get some additional information.</p>
+<pre class="r"><code>canProcessInMemory(r, verbose = TRUE)
+#&gt; memory stats in GB
+#&gt; mem available: 6.26
+#&gt;         60%  : 3.75
+#&gt; mem needed   : 0.27
+#&gt; max allowed  : 4.66  (if available)
+#&gt; [1] TRUE</code></pre>
+<p>This tells me how much free memory I have available on my computer and how much memory is required for this <code>Raster*</code> object. We don’t want <code>raster</code> eating up all our memory, so <code>raster</code> has two user adjustable options to specify the maximum amount of memory it will use in bytes or relative to the available memory. These values default to 5 billion bytes (4.66 GB) and 60%, respectively, but can be adjusted with <code>rasterOptions()</code>.</p>
+<p><code>raster</code> functions call <code>canProccessInMemory()</code> when they’re invoked, then use a different approach for processing depending on the results:</p>
+<ul>
+<li><code>canProcessInMemory(r) == TRUE</code>: read the entire object into the R session, then process all at once similar to <code>apply()</code>.</li>
+<li><code>canProcessInMemory(r) == FALSE</code>: process the raster in blocks of rows, each of which is small enough to store in memory. This approach requires that the output raster object is saved in a file. Blocks of rows are read from the input files, processed in R, then written to the output file, and this is done iteratively for all the blocks until the whole raster is processed.</li>
+</ul>
+<p>One wrinkle to this is that each <code>raster</code> function has different memory requirements. This is dealt with using the <code>n</code> argument to <code>canProccessInMemory()</code>, which specifies the number of copies of the <code>Raster*</code> object’s cell values that the function needs to have in memory. Specifically, the estimated memory requirement in bytes is <code>8 * n * ncell(r) * nlayers(r)</code>. Let’s see how different values of <code>n</code> affect whether a raster can be processed in memory:</p>
+<pre class="r"><code>tibble(n = c(1, 10, 20, 30, 40, 50, 60)) %&gt;% 
+  mutate(process_in_mem = map_lgl(n, canProcessInMemory, x = r))
+#&gt; # A tibble: 7 x 2
+#&gt;       n process_in_mem
+#&gt;   &lt;dbl&gt; &lt;lgl&gt;         
+#&gt; 1     1 TRUE          
+#&gt; 2    10 TRUE          
+#&gt; 3    20 TRUE          
+#&gt; 4    30 TRUE          
+#&gt; 5    40 TRUE          
+#&gt; 6    50 TRUE          
+#&gt; 7    60 FALSE</code></pre>
+<p>So, even though I called this a “large” raster, R can still handle processing it in memory until we get to requiring a fairly large number of copies, at which time, the raster will switch to being processed in blocks. For reason I don’t fully understand, the <a href="https://github.com/rspatial/raster/blob/master/R/calc.R">source code of the <code>calc()</code> function</a> suggests that it’s using <code>n = 2 * (nlayers(r) + 1)</code>, which is 20, so <code>calc()</code> is processing this raster in memory on my system. Indeed, we can confirm that the result of this calculation are stored in a memory with <code>inMemory()</code>.</p>
+<pre class="r"><code>inMemory(r_mean)
+#&gt; [1] TRUE</code></pre>
+<p>What’s the point of going to all this trouble? If a raster can be processed in blocks to reduce memory usage, why not do it all the time? The issue is that processing in memory is much faster than processing in blocks and having to write to a file. We can see this by forcing <code>calc()</code> to process on disk in blocks by setting <code>rasterOptions(todisk = TRUE)</code>.</p>
+<pre class="r"><code># in memory
+rasterOptions(todisk = FALSE)
+t_inmem &lt;- system.time(calc(r, mean, na.rm = TRUE))
+print(t_inmem)
+#&gt;    user  system elapsed 
+#&gt;   5.453   0.156   5.612
+
+# on disk
+rasterOptions(todisk = TRUE)
+t_ondisk &lt;- system.time(calc(r, mean, na.rm = TRUE))
+print(t_ondisk)
+#&gt;    user  system elapsed 
+#&gt;   5.479   0.337   5.821
+rasterOptions(todisk = FALSE)</code></pre>
+<p>So, we see a 3.7% increase in efficiency by processing in memory. The <code>profmem</code> package can gives us some information on the different amounts of memory used for the two approaches. Specifically, we can estimate the maximum amount of memory used at any one time by <code>calc()</code>.</p>
+<pre class="r"><code># in memory
+rasterOptions(todisk = FALSE)
+m_inmem &lt;- max(profmem(calc(r, mean, na.rm = TRUE))$bytes, na.rm = TRUE)
+
+# on disk
+rasterOptions(todisk = TRUE)
+m_ondisk &lt;- max(profmem(calc(r, mean, na.rm = TRUE))$bytes, na.rm = TRUE)
+rasterOptions(todisk = FALSE)
+#&gt; [1] &quot;In memory (MB):  69&quot;
+#&gt; [1] &quot;On disk (MB):  17&quot;</code></pre>
+<p>So, it’s clear that different ways of processing <code>Raster*</code> objects affects both the processing time and resource use.</p>
+</div>
+<div id="raster-options" class="section level2">
+<h2><code>raster</code> options</h2>
+<p>The <code>raster</code> package has a few options that can adjusted to tweak how functions process data. Let’s take a look at the default values:</p>
+<pre class="r"><code>rasterOptions()
+#&gt; format        : raster 
+#&gt; datatype      : FLT4S 
+#&gt; overwrite     : FALSE 
+#&gt; progress      : none 
+#&gt; timer         : FALSE 
+#&gt; chunksize     : 1e+08 
+#&gt; maxmemory     : 5e+09 
+#&gt; memfrac       : 0.6 
+#&gt; tmpdir        : /var/folders/mg/qh40qmqd7376xn8qxd6hm5lwjyy0h2/T//RtmpEYHdRs/raster// 
+#&gt; tmptime       : 168 
+#&gt; setfileext    : TRUE 
+#&gt; tolerance     : 0.1 
+#&gt; standardnames : TRUE 
+#&gt; warn depracat.: TRUE 
+#&gt; header        : none</code></pre>
+<p>The options relevant to memory and processing are:</p>
+<ul>
+<li><code>maxmemory</code>: the maximum amount of memory (in bytes) to use for a given operation, defaults to 5 billion bytes (4.66 GB).</li>
+<li><code>memfrac</code>: the maximum proportion of the available memory to use for a given operation, defaults to 60%.</li>
+<li><code>chunksize</code>: the maximum size (in bytes) of individual chunks of data to read/write when a raster is being processed in blocks, defaults to 100 million bytes (0.1 GB).</li>
+<li><code>todisk</code>: used to force processing on disk in blocks.</li>
+</ul>
+<p>For example, we can adjust <code>chunksize</code> to force <code>calc()</code> to process our raster stack in smaller pieces. Note that <code>raster</code> actually ignores user specified values of <code>chunksize</code> if they’re below <span class="math inline">\(10^5\)</span>, so I’ll have to do something sketchy and overwrite an internal <code>raster</code> function to allow this.</p>
+<pre class="r"><code># hack raster internal function
+cs_orig &lt;- raster:::.chunk
+cs_hack &lt;- function(x) getOption(&quot;rasterChunkSize&quot;)
+assignInNamespace(&quot;.chunk&quot;, cs_hack, ns = &quot;raster&quot;)
+
+# use 1 kb chunks
+rasterOptions(chunksize = 1000, todisk = TRUE)
+t_smallchunks &lt;- system.time(calc(r, mean, na.rm = TRUE))
+
+# undo the hack
+assignInNamespace(&quot;.chunk&quot;, cs_orig, ns = &quot;raster&quot;)
+rasterOptions(default = TRUE)</code></pre>
+<p>Processing in smaller chunks resulted in a 46.0% decrease in efficiency compared to the default chunk size. All this suggests to me that, when dealing with large rasters, it makes sense to increase <code>maxmemory</code> as much as feasible given the memory available on your system; the default value of ~ 1 GB is quite small for a modern computer. Then, once you get to a point where the raster has to be processed in blocks, increase <code>chunksize</code> to take advantage of as much memory as you have available.</p>
+</div>
+<div id="processing-in-blocks" class="section level2">
+<h2>Processing in blocks</h2>
+<p>I want to take a quick detour to understand exactly how <code>raster</code> processes data in blocks. Looking at the <a href="https://github.com/rspatial/raster/blob/master/R/calc.R">source code of the <code>calc()</code> function</a> gives a template for how this is done. A few <code>raster</code> functions help with this:</p>
+<ul>
+<li><code>blockSize()</code> suggests a sensible way to break up a <code>Raster*</code> object for processing in blocks. The <code>raster</code> objects always uses a set of entire rows as blocks, so this function gives the starting row numbers of each block.</li>
+<li><code>readStart()</code> opens a file on disk for reading.</li>
+<li><code>getValues()</code> reads a block of data, defined by the starting row and number of rows.</li>
+<li><code>readStop()</code> closes the input file.</li>
+<li><code>writeStart()</code> opens a file on disk for writing the results of our calculations to.</li>
+<li><code>writeValues()</code> writes a block of data to a file, starting at a given row.</li>
+<li><code>writeStop()</code> closes the output file.</li>
+</ul>
+<p>Let’s set things up to replicate what <code>calc()</code> does. First we need to determine how to dive the input raster up into blocks for processing:</p>
+<pre class="r"><code># file paths
+f_in &lt;- &quot;data/large-raster.tif&quot;
+f_out &lt;- tempfile(fileext = &quot;.tif&quot;)
+
+# input and output rasters
+r_in &lt;- stack(f_in)
+r_out &lt;- raster(r_in)
+
+# blocks
+b &lt;- blockSize(r_in)
+print(b)
+#&gt; $row
+#&gt; [1]   1 251 501 751
+#&gt; 
+#&gt; $nrows
+#&gt; [1] 250 250 250 250
+#&gt; 
+#&gt; $n
+#&gt; [1] 4</code></pre>
+<p>So, <code>blockSize()</code> is suggesting we break the file up into 4 blocks (<code>b$n</code>) of 250 (<code>b$nrows</code>) each, and <code>b$rows</code> gives us the starting row value for each block. Now we open the input and output files, process the blocks iteratively, reading and writing as necessary, then close the files.</p>
+<pre class="r"><code># open files
+r_in &lt;- readStart(r_in)
+r_out &lt;- writeStart(r_out, filename = f_out)
+
+# loop over blocks
+for (i in seq_along(b$row)) {
+  # read values for block
+  # format is a matrix with rows the cells values and columns the layers
+  v &lt;- getValues(r_in, row = b$row[i], nrows = b$nrows[i])
+  
+  # mean cell value across layers
+  v &lt;- rowMeans(v, na.rm = TRUE)
+  
+  # write to output file
+  r_out &lt;- writeValues(r_out, v, b$row[i])
+}
+
+# close files
+r_out &lt;- writeStop(r_out)
+r_in &lt;- readStop(r_in)</code></pre>
+<p>That’s it, not particularly complicated! Let’s make sure it worked by comparing to the results from <code>calc()</code>.</p>
+<pre class="r"><code>cellStats(abs(r_mean- r_out), max, na.rm = TRUE)
+#&gt; [1] 2.98e-08</code></pre>
+<p>Everything looks good, the results are identical! Hopefully, this minimal example is a good template if you want to build your own raster processing functions.</p>
+</div>
+<div id="parallel-processing" class="section level2">
+<h2>Parallel processing</h2>
+<p>Breaking a raster up into blocks and processing each independently suggests another approach to more efficient raster processing: parallelization. Each block could be processed by a different core or node and the results will be collected in the output file. Fortunately, <code>raster</code> has some nice tools for parallel raster processing. The function <code>clusterR()</code> essentially takes an existing <code>raster</code> function such as <code>calc()</code> and runs it in parallel. Prior to using it, we need to Here’s how it works:</p>
+<pre class="r"><code># start a cluster with four cores
+beginCluster(n = 4)
+t_parallel &lt;- system.time({
+  parallel_mean &lt;- clusterR(r, fun = calc,
+                            args = list(fun = mean, na.rm = TRUE))
+})
+endCluster()
+
+# time for parallel calc
+t_parallel[3]
+#&gt; elapsed 
+#&gt;    10.2
+# time for sequential calc
+t_ondisk[3]
+#&gt; elapsed 
+#&gt;    5.82</code></pre>
+<p>Hmmm, there’s something odd going on here, it’s taking longer for the parallel version than the sequential version. I suspect I’ve messed something up in the parallel implementation. Let me know if you know what I’ve done wrong, perhaps it’s a topic for another post.</p>
+</div>

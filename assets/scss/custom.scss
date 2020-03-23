@@ -1,0 +1,25 @@
+// Override this file to add your own SCSS styling.
+.navbar {
+  font-size: 1.25rem;
+  
+    .navbar-nav {
+    .nav-link {
+      &.active {
+        font-weight: normal !important;
+      }
+    }
+  }
+}
+
+.portrait-title h2 {
+    font-size: 1.25rem;
+}
+
+#about {
+  font-size: 0.9rem;
+}
+
+.article-container {
+  max-width: 900px;
+  font-weight: 300;
+}

@@ -1,0 +1,6 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+public/
+content/post/2020-03-22-block-processing-rasters/data/*
