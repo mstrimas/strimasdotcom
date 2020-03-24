@@ -23,7 +23,7 @@ editor_options:
 
 
 
-<p>We work with a lot of huge raster datasets on the <a href="https://ebird.org/science/">eBird Status &amp; Trends</a> project, and processing them is becoming a real bottleneck in our R workflow. For example, we make weekly estimates of bird abundance at 3 km resolution across the entire Western Hemisphere, which results in raster stacks with billions of cells! To produce seasonal abundance maps, we need to average the weekly layers across all weeks within each season using the <code>raster</code> function <code>calc()</code>, and it takes forever with these huge files! In this post, I’m going to try to understand how <code>raster</code> processes data and explore how this can be tweaked to improve computational efficiency.</p>
+<p>We work with a lot of large raster datasets on the <a href="https://ebird.org/science/">eBird Status &amp; Trends</a> project, and processing them is becoming a real bottleneck in our R workflow. For example, we make weekly estimates of bird abundance at 3 km resolution across the entire Western Hemisphere, which results in raster stacks with billions of cells! To produce seasonal abundance maps, we need to average the weekly layers across all weeks within each season using the <code>raster</code> function <code>calc()</code>, and it takes forever with these huge files! In this post, I’m going to try to understand how <code>raster</code> processes data and explore how this can be tweaked to improve computational efficiency. Most of the material is covered in greater detail in <a href="https://rspatial.org/raster/RasterPackage.pdf">the <code>raster</code> package vignette</a>, especially Chapter 10 of that document.</p>
 <p>In general, R holds objects in memory, which results in a limit to the size of objects that can be processed. This poses a problem for processing raster datasets, which can be much larger than the available system memory. The <code>raster</code> package addresses this by only storing references to raster files within its <code>Raster*</code> objects. Depending on the memory requirements for a given raster calculation, and the memory available, the package functions will either read the whole dataset into R for processing or process it in smaller chunks.</p>
 <p>Let’s start by importing an example dataset generated using the <code>simulate_species()</code> function from the <code>prioritizr</code> package. The raster has dimensions 1000x1000 and 9 layers.</p>
 <pre class="r"><code>library(raster)
@@ -72,8 +72,8 @@ apply(a, 1:2, mean)
 <p>But what <code>raster</code> is doing in <code>calc()</code> is a little different and depends on the memory requirements of the calculation. We can use the function <code>canProccessInMemory()</code> to test whether a <code>Raster*</code> object can be loaded into memory for processing or not. We’ll use <code>verbose = TRUE</code> to get some additional information.</p>
 <pre class="r"><code>canProcessInMemory(r, verbose = TRUE)
 #&gt; memory stats in GB
-#&gt; mem available: 6.26
-#&gt;         60%  : 3.75
+#&gt; mem available: 5.11
+#&gt;         60%  : 3.06
 #&gt; mem needed   : 0.27
 #&gt; max allowed  : 4.66  (if available)
 #&gt; [1] TRUE</code></pre>
@@ -94,7 +94,7 @@ apply(a, 1:2, mean)
 #&gt; 3    20 TRUE          
 #&gt; 4    30 TRUE          
 #&gt; 5    40 TRUE          
-#&gt; 6    50 TRUE          
+#&gt; 6    50 FALSE         
 #&gt; 7    60 FALSE</code></pre>
 <p>So, even though I called this a “large” raster, R can still handle processing it in memory until we get to requiring a fairly large number of copies, at which time, the raster will switch to being processed in blocks. For reason I don’t fully understand, the <a href="https://github.com/rspatial/raster/blob/master/R/calc.R">source code of the <code>calc()</code> function</a> suggests that it’s using <code>n = 2 * (nlayers(r) + 1)</code>, which is 20, so <code>calc()</code> is processing this raster in memory on my system. Indeed, we can confirm that the result of this calculation are stored in a memory with <code>inMemory()</code>.</p>
 <pre class="r"><code>inMemory(r_mean)
@@ -105,16 +105,16 @@ rasterOptions(todisk = FALSE)
 t_inmem &lt;- system.time(calc(r, mean, na.rm = TRUE))
 print(t_inmem)
 #&gt;    user  system elapsed 
-#&gt;   5.453   0.156   5.612
+#&gt;   5.533   0.149   5.699
 
 # on disk
 rasterOptions(todisk = TRUE)
 t_ondisk &lt;- system.time(calc(r, mean, na.rm = TRUE))
 print(t_ondisk)
 #&gt;    user  system elapsed 
-#&gt;   5.479   0.337   5.821
+#&gt;   5.683   0.392   6.091
 rasterOptions(todisk = FALSE)</code></pre>
-<p>So, we see a 3.7% increase in efficiency by processing in memory. The <code>profmem</code> package can gives us some information on the different amounts of memory used for the two approaches. Specifically, we can estimate the maximum amount of memory used at any one time by <code>calc()</code>.</p>
+<p>So, we see a 6.9% increase in efficiency by processing in memory. The <code>profmem</code> package can gives us some information on the different amounts of memory used for the two approaches. Specifically, we can estimate the maximum amount of memory used at any one time by <code>calc()</code>.</p>
 <pre class="r"><code># in memory
 rasterOptions(todisk = FALSE)
 m_inmem &lt;- max(profmem(calc(r, mean, na.rm = TRUE))$bytes, na.rm = TRUE)
@@ -139,7 +139,7 @@ rasterOptions(todisk = FALSE)
 #&gt; chunksize     : 1e+08 
 #&gt; maxmemory     : 5e+09 
 #&gt; memfrac       : 0.6 
-#&gt; tmpdir        : /var/folders/mg/qh40qmqd7376xn8qxd6hm5lwjyy0h2/T//RtmpEYHdRs/raster// 
+#&gt; tmpdir        : /var/folders/mg/qh40qmqd7376xn8qxd6hm5lwjyy0h2/T//Rtmp3inPgu/raster// 
 #&gt; tmptime       : 168 
 #&gt; setfileext    : TRUE 
 #&gt; tolerance     : 0.1 
@@ -166,7 +166,7 @@ t_smallchunks &lt;- system.time(calc(r, mean, na.rm = TRUE))
 # undo the hack
 assignInNamespace(&quot;.chunk&quot;, cs_orig, ns = &quot;raster&quot;)
 rasterOptions(default = TRUE)</code></pre>
-<p>Processing in smaller chunks resulted in a 46.0% decrease in efficiency compared to the default chunk size. All this suggests to me that, when dealing with large rasters, it makes sense to increase <code>maxmemory</code> as much as feasible given the memory available on your system; the default value of ~ 1 GB is quite small for a modern computer. Then, once you get to a point where the raster has to be processed in blocks, increase <code>chunksize</code> to take advantage of as much memory as you have available.</p>
+<p>Processing in smaller chunks resulted in a 56.4% decrease in efficiency compared to the default chunk size. All this suggests to me that, when dealing with large rasters, it makes sense to increase <code>maxmemory</code> as much as feasible given the memory available on your system; the default value of ~ 1 GB is quite small for a modern computer. Then, once you get to a point where the raster has to be processed in blocks, increase <code>chunksize</code> to take advantage of as much memory as you have available.</p>
 </div>
 <div id="processing-in-blocks" class="section level2">
 <h2>Processing in blocks</h2>
@@ -240,10 +240,10 @@ endCluster()
 # time for parallel calc
 t_parallel[3]
 #&gt; elapsed 
-#&gt;    10.2
+#&gt;    10.7
 # time for sequential calc
 t_ondisk[3]
 #&gt; elapsed 
-#&gt;    5.82</code></pre>
+#&gt;    6.09</code></pre>
 <p>Hmmm, there’s something odd going on here, it’s taking longer for the parallel version than the sequential version. I suspect I’ve messed something up in the parallel implementation. Let me know if you know what I’ve done wrong, perhaps it’s a topic for another post.</p>
 </div>

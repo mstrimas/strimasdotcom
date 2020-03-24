@@ -1,1 +1,1 @@
-GitHub Pages repository for [mstrimas.github.io](http://mstrimas.github.io).
+Source for personal website [strimas.com](https://strimas.com), created using `blogdown` and the Hugo Academic theme. Comiled website is at: https://github.com/mstrimas/mstrimas.github.io
