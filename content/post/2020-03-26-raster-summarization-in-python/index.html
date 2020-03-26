@@ -1,0 +1,124 @@
+---
+title: Raster Summarization in Python
+author: Matt Strimas-Mackey
+date: '2020-03-26'
+slug: 'raster-summarization-in-python'
+categories: []
+tags:
+  - Spatial
+  - Python
+  - R
+subtitle: ''
+summary: ''
+authors: []
+lastmod: '2020-03-26T06:39:19-04:00'
+featured: no
+image:
+  caption: ''
+  focal_point: ''
+  preview_only: no
+projects: []
+editor_options: 
+  chunk_output_type: console
+---
+
+
+
+<p>As part of the <a href="https://ebird.org/science/">eBird Status &amp; Trends</a> team, I often find myself having to quickly summarize large rasters across layers. For examples, we might summarize weekly relative abundance layers for a single species across the weeks to estimate year round abundance or, for a given week, we might summarize across species to produce a <a href="https://en.wikipedia.org/wiki/Species_richness">species richness</a> layer. I previously talked about how to perform these summarizations efficiently in R <a href="/post/processing-large-rasters-in-r/">here</a> and <a href="/post/2020-03-24-block-processing-rasters/">here</a>. However, despite my best efforts, I could get the <code>raster</code> R package to perform as quickly as I wanted it to. After a little googling, I started to think maybe the answer to “how do I quickly summarize rasters across layers in R?” might be “screw it, use Python!”.</p>
+<p>The <a href="https://gdal.org/programs/gdal_calc.html"><code>gdal_calc.py</code></a> tool is a general purpose raster calculator using GDAL. You can do all sorts of stuff with it: adding layers, multiplying layers, reclassification, and calculating the mean or sum, among many other things. I did a few tests, and it seemed to be faster than <code>raster</code> in R. There are three issues that made it a pain to work with though. First, you’re limited to working with a maximum of 26 layers or bands, and we often need to summarize across 52 weeks or hundreds of species. Second, in an effort to allow any possible type of raster algebra, the syntax is a bit verbose. For example, to find the cell-wise mean across two raster files, you’d use:</p>
+<pre class="python"><code>gdal_calc.py -A input.tif -B input2.tif --outfile=result.tif --calc=&quot;(A+B)/2&quot;</code></pre>
+<p>which becomes cumbersome when you have many rasters. Finally, I found it hard to get <code>gdal_calc.py</code> to play nicely with missing values. I wanted to <code>gdal_calc.py</code> to ignore missing values similarly to <code>mean(x, na.rm = TRUE)</code> in R, but it wasn’t doing that.</p>
+<p>To overcome these issues, I decided to teach myself Python and create my own tool, aided by the source code of <code>gdal_calc.py</code>, that’s specifically designed for summarizing raster data across layers or bands. This tool is <code>gdal-summarize.py</code> and is <a href="https://github.com/mstrimas/gdal-summarize">available on GitHub</a>. I hope others will use it and provide feedback; this is my first foray into Python!</p>
+<div id="gdal_summarize.py" class="section level2">
+<h2><code>gdal_summarize.py</code></h2>
+<p>The goal of <code>gdal-summarize.py</code> is to summarize raster data across layers or bands. There are two common use cases for this tool. The first is calculating a cell-wise summary across the bands of a raster file (e.g. a GeoTIFF). For example, given a multi-band input GeoTIFF file <code>input.tif</code>, to calculate the cell-wise sum of the first three bands use:</p>
+<pre class="bash"><code>gdal-summarize.py input.tif --bands 1 2 3 --outfile output.tif</code></pre>
+<p>Alternatively, to compute the cell-wise sum across multiple GeoTIFF files (<code>input1.tif</code>, <code>input2.tif</code>, and <code>input3.tif</code>) use:</p>
+<pre class="bash"><code>gdal-summarize.py input1.tif input2.tif input3.tif --outfile output.tif</code></pre>
+<p>If these input files have multiple bands, the default behavior is to summarize them across the <strong>first</strong> band of each file; however, the <code>--bands</code> argument can override this behavior:</p>
+<pre class="bash"><code># summarize across the second band of each file
+gdal-summarize.py input1.tif input2.tif input3.tif --bands 2 --outfile output.tif
+# summarize across band 1 of input1.tif and band 2 of input2.tif
+gdal-summarize.py input1.tif input2.tif --bands 1 2 --outfile output.tif</code></pre>
+<div id="summary-functions" class="section level3">
+<h3>Summary functions</h3>
+<p>The default behavior is to perform a cell-wise sum; however, other summary functions are available via the <code>--function</code> argument:</p>
+<ul>
+<li><code>sum</code>: cell-wise sum across layers.</li>
+<li><code>mean</code>: cell-wise mean across layers.</li>
+<li><code>count</code>: count the number layers with non-negative value for each cell.</li>
+<li><code>richness</code>: count the number of layers with positive values for each cell.</li>
+</ul>
+<p>In all cases, these functions remove missing values (i.e. NoData or NA) prior to calculating the summary statistic. For example, the mean of the numners, 1, 2, and NoData is 1.5. This is similar to the way <code>na.rm = TRUE</code> works in R. I’d be happy to add additional summary functions, just <a href="https://github.com/mstrimas/gdal-summarize/issues/new/choose">open an issue</a> or <a href="https://github.com/mstrimas/gdal-summarize/compare">submit a pull request</a> on GitHub.</p>
+</div>
+<div id="block-processing" class="section level3">
+<h3>Block processing</h3>
+<p>To avoid having to read an entire raster file into memory, <code>gdal-summarize.py</code> processes input rasters in blocks; it will read in a block of data, summarize it, then output to file, before proceeding to the next block. GDAL will suggest a “natural” block size for efficiently processing the data (typically 256X256 cells for GeoTIFFs), but users can also specify their own block size with command line arguments in one of two ways:</p>
+<ul>
+<li><code>--block_size/-s</code>: two integers given the x and y dimensions of the block. Note that the x dimension corresponds to columns, while the y dimension corresponds to rows.</li>
+<li><code>--nrows/-n</code>: an integer specifying the number of rows in each block. If this approach is used, the raster will be processed in groups of entire rows.</li>
+</ul>
+<p>It’s not clear to me what the most efficient block size is, so using the default block size is probably a good starting point. This <a href="https://gis.stackexchange.com/questions/172666/optimizing-python-gdal-readasarray">StackExchange question</a> has some thoughts on block size and efficiency and suggests it could be worth doing some tests to see what works best for your scenario.</p>
+</div>
+</div>
+<div id="comparing-python-and-r" class="section level2">
+<h2>Comparing Python and R</h2>
+<p>Everyone loves a good Python vs. R battle, so let’s put <code>calc()</code> from the <code>raster</code> R package up against <code>gdal-summarize.py</code>. I use the same <a href="https://ebird.org/science/status-and-trends/woothr">Wood Thrush</a> relative abundance raster from eBird Status and Trends as I used in my <a href="/post/2020-03-24-block-processing-rasters/">previous post</a>, consisting of 16 bands with dimensions 5630X7074. Since <code>raster</code> processes data in blocks of rows, I’ll do the same thing for <code>gdal-summarize.py</code>.</p>
+<pre class="r"><code>library(raster)
+library(tidyverse)
+
+f &lt;- &quot;data/woothr.tif&quot;
+r &lt;- stack(f)
+
+# choose the values of n_rows to try
+n_rows &lt;- 2^seq(0, ceiling(log2(nrow(r))))
+n_rows[length(n_rows)] &lt;- nrow(r)
+
+# set up 10 repetitions of each n_rows value
+nrow_grid &lt;- expand_grid(rep = 1:10, n_rows = n_rows)
+
+# summarize raster using each value of n_rows
+summarize_nrows &lt;- function(x) {
+  # time r
+  t_r &lt;- system.time({
+    r_mean &lt;- summarize_raster(r, &quot;mean&quot;, n_rows = x)
+  })
+  # time python
+  f_out &lt;- &quot;woothr-mean.tif&quot;
+  t_py &lt;- system.time({
+    str_glue(&quot;source ~/.bash_profile;&quot;,
+             &quot;gdal-summarize.py {f} -o {f_out} -w -f &#39;mean&#39; -n {x}&quot;) %&gt;% 
+      system()
+  })
+  tibble(elapsed_r = t_r[&quot;elapsed&quot;], elapsed_py = t_py[&quot;elapsed&quot;])
+}
+time_summarize &lt;- nrow_grid %&gt;% 
+  mutate(results = map(n_rows, summarize_nrows)) %&gt;% 
+  unnest(cols = results)</code></pre>
+<p>Let’s take look at how they compare:</p>
+<pre class="r"><code># x-axis breaks
+brks &lt;- 2^seq(0, ceiling(log2(nrow(r))), by = 2)
+brks[length(brks)] &lt;- nrow(r)
+
+# transform to longer for ggplot
+time_summarize &lt;- time_summarize %&gt;% 
+  pivot_longer(cols = c(elapsed_r, elapsed_py)) %&gt;% 
+  mutate(name = recode(name, &quot;elapsed_r&quot; = &quot;R&quot;, &quot;elapsed_py&quot; = &quot;Python&quot;))
+
+# plot
+ggplot(time_summarize) +
+  aes(x = n_rows, y = value / 60, group = name, color = name) +
+  geom_point(alpha = 0.25, size = 0.75) +
+  geom_smooth(method = &quot;gam&quot;) +
+  scale_x_continuous(trans = &quot;log2&quot;, breaks = brks) +
+  scale_color_brewer(palette = &quot;Set1&quot;) +
+  labs(x = &quot;# of rows/block size (log2 scale)&quot;, 
+       y = &quot;Elapsed time (minutes)&quot;,
+       color = NULL,
+       title = &quot;Python vs. R raster summarization&quot;,
+       subtitle = &quot;5630x7074 raster, mean of 16 layers&quot;) +
+  theme(legend.position = &quot;bottom&quot;)</code></pre>
+<p><img src="/post/2020-03-26-raster-summarization-in-python/index_files/figure-html/time-plot-1.png" width="\textwidth" style="display: block; margin: auto;" /></p>
+<p>So, not only is Python raster than R, but Python experiences much less of a block size effect.</p>
+<p>Hopefully others will find this tool useful! Please take a look through the <a href="https://github.com/mstrimas/gdal-summarize">GitHub repo</a> and let me know if there’s something I could be doing differently. As I said at the start, this is my first foray into Python, so I’m bound to have made some mistakes.</p>
+</div>

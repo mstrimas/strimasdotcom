@@ -10,7 +10,7 @@ tags:
 subtitle: ''
 summary: 'In this post, I examine how the size of blocks impacts the efficiency of block processing raster data in R'
 authors: []
-lastmod: '2020-03-22T10:10:24-04:00'
+lastmod: '2020-03-26T10:10:24-04:00'
 featured: no
 image:
   caption: ''
@@ -23,7 +23,7 @@ editor_options:
 
 
 
-<p>In <a href="post/processing-large-rasters-in-r/">my previous post</a>, I tried to understand how <code>raster</code> package functions like <code>calc()</code> process raster data. The package does a good job of abstracting a lot of this detail away from users, data will be processed either on disk or in memory based on criteria related to the size of the raster, the available resources, and user-defined parameters. In addition, if processing is done on disk, the raster will be processed in blocks, the size of which is user controlled. In most cases, <code>raster</code> makes sensible choices and the whole process works seamlessly for the user. However, I’ve found that, for large raster datasets, the specific details of <em>how</em> a raster is processed in blocks can make a big difference in terms of computational efficient. Furthermore, with <code>raster</code> it’s hard to know exactly what’s going on behind the scenes and the parameters that we can tune through <code>rasterOptions()</code> don’t give me as much direct control over the processing as I’d like. In this post, I’m going to try taking lower level control of <code>raster</code> processing and explore how choices about block size impact processing speed.</p>
+<p>In <a href="/post/processing-large-rasters-in-r/">my previous post</a>, I tried to understand how <code>raster</code> package functions like <code>calc()</code> process raster data. The package does a good job of abstracting a lot of this detail away from users, data will be processed either on disk or in memory based on criteria related to the size of the raster, the available resources, and user-defined parameters. In addition, if processing is done on disk, the raster will be processed in blocks, the size of which is user controlled. In most cases, <code>raster</code> makes sensible choices and the whole process works seamlessly for the user. However, I’ve found that, for large raster datasets, the specific details of <em>how</em> a raster is processed in blocks can make a big difference in terms of computational efficient. Furthermore, with <code>raster</code> it’s hard to know exactly what’s going on behind the scenes and the parameters that we can tune through <code>rasterOptions()</code> don’t give me as much direct control over the processing as I’d like. In this post, I’m going to try taking lower level control of <code>raster</code> processing and explore how choices about block size impact processing speed.</p>
 <p>To demonstrate all this, I’m going to use some real data from the <a href="https://ebird.org/science/status-and-trends/woothr/abundance-map">eBird Status &amp; Trends</a>; this is a dataset that I work with on a daily basis in my job. The below code downloads weekly relative abundance for Wood Thrush at 3 km resolution across the entire western hemisphere, subsets the annual data to just the weeks of the breeding season (May 24 - September 7), then saves the results as a GeoTIFF.</p>
 <pre class="r"><code>library(ebirdst)
 library(raster)
@@ -73,13 +73,13 @@ r &lt;- writeRaster(r, &quot;data/woothr.tif&quot;)</code></pre>
 r_mean_calc &lt;- calc(r, mean, na.rm = TRUE)
 #&gt; Using 111 blocks of 51 rows.
 toc()
-#&gt; 127.396 sec elapsed</code></pre>
+#&gt; 123.082 sec elapsed</code></pre>
 <p>In this case, with the default chunk size of <span class="math inline">\(10^8 \approx 0.1 GB\)</span>, <code>calc()</code> processes this raster in 111 blocks of 51 rows each. We can use my custom <code>summarize_raster()</code> function to do the same thing, but specify block size explicitly.</p>
 <pre class="r"><code>tic()
 r_mean_summ &lt;- summarize_raster(r, &quot;mean&quot;, n_rows = 51)
 #&gt; Using 111 blocks of 51 rows.
 toc()
-#&gt; 118.721 sec elapsed</code></pre>
+#&gt; 121.301 sec elapsed</code></pre>
 <p>Turns out <code>summarize_raster()</code> is slightly faster because I’ve slimmed it down and removed some additional checks and functionality. We can confirm that the two approaches produce the same results.</p>
 <pre class="r"><code>cellStats(abs(r_mean_calc - r_mean_summ), max)
 #&gt; [1] 0</code></pre>

@@ -10,7 +10,7 @@ tags:
 subtitle: ''
 summary: 'In this post, I examine how the size of blocks impacts the efficiency of block processing raster data in R'
 authors: []
-lastmod: '2020-03-22T10:10:24-04:00'
+lastmod: '2020-03-26T10:10:24-04:00'
 featured: no
 image:
   caption: ''
@@ -22,10 +22,10 @@ editor_options:
 ---
 
 ```{r here, include = FALSE, eval = FALSE}
-setwd(here::here("content/post/2020-03-22-block-processing-rasters/"))
+setwd(here::here("content/post/2020-03-24-block-processing-rasters/"))
 ```
 
-In [my previous post](post/processing-large-rasters-in-r/), I tried to understand how `raster` package functions like `calc()` process raster data. The package does a good job of abstracting a lot of this detail away from users, data will be processed either on disk or in memory based on criteria related to the size of the raster, the available resources, and user-defined parameters. In addition, if processing is done on disk, the raster will be processed in blocks, the size of which is user controlled. In most cases, `raster` makes sensible choices and the whole process works seamlessly for the user. However, I've found that, for large raster datasets, the specific details of *how* a raster is processed in blocks can make a big difference in terms of computational efficient. Furthermore, with `raster` it's hard to know exactly what's going on behind the scenes and the parameters that we can tune through `rasterOptions()` don't give me as much direct control over the processing as I'd like. In this post, I'm going to try taking lower level control of `raster` processing and explore how choices about block size impact processing speed.
+In [my previous post](/post/processing-large-rasters-in-r/), I tried to understand how `raster` package functions like `calc()` process raster data. The package does a good job of abstracting a lot of this detail away from users, data will be processed either on disk or in memory based on criteria related to the size of the raster, the available resources, and user-defined parameters. In addition, if processing is done on disk, the raster will be processed in blocks, the size of which is user controlled. In most cases, `raster` makes sensible choices and the whole process works seamlessly for the user. However, I've found that, for large raster datasets, the specific details of *how* a raster is processed in blocks can make a big difference in terms of computational efficient. Furthermore, with `raster` it's hard to know exactly what's going on behind the scenes and the parameters that we can tune through `rasterOptions()` don't give me as much direct control over the processing as I'd like. In this post, I'm going to try taking lower level control of `raster` processing and explore how choices about block size impact processing speed.
 
 To demonstrate all this, I'm going to use some real data from the [eBird Status & Trends](https://ebird.org/science/status-and-trends/woothr/abundance-map); this is a dataset that I work with on a daily basis in my job. The below code downloads weekly relative abundance for Wood Thrush at 3 km resolution across the entire western hemisphere, subsets the annual data to just the weeks of the breeding season (May 24 - September 7), then saves the results as a GeoTIFF.
 
