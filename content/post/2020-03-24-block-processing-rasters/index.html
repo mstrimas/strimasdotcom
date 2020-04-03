@@ -5,7 +5,7 @@ date: '2020-03-24'
 slug: 'block-processing-rasters'
 categories: []
 tags:
-  - r
+  - R
   - Spatial
 subtitle: ''
 summary: 'In this post, I examine how the size of blocks impacts the efficiency of block processing raster data in R'
@@ -73,13 +73,13 @@ r &lt;- writeRaster(r, &quot;data/woothr.tif&quot;)</code></pre>
 r_mean_calc &lt;- calc(r, mean, na.rm = TRUE)
 #&gt; Using 111 blocks of 51 rows.
 toc()
-#&gt; 123.082 sec elapsed</code></pre>
+#&gt; 127.619 sec elapsed</code></pre>
 <p>In this case, with the default chunk size of <span class="math inline">\(10^8 \approx 0.1 GB\)</span>, <code>calc()</code> processes this raster in 111 blocks of 51 rows each. We can use my custom <code>summarize_raster()</code> function to do the same thing, but specify block size explicitly.</p>
 <pre class="r"><code>tic()
 r_mean_summ &lt;- summarize_raster(r, &quot;mean&quot;, n_rows = 51)
 #&gt; Using 111 blocks of 51 rows.
 toc()
-#&gt; 121.301 sec elapsed</code></pre>
+#&gt; 125.852 sec elapsed</code></pre>
 <p>Turns out <code>summarize_raster()</code> is slightly faster because I’ve slimmed it down and removed some additional checks and functionality. We can confirm that the two approaches produce the same results.</p>
 <pre class="r"><code>cellStats(abs(r_mean_calc - r_mean_summ), max)
 #&gt; [1] 0</code></pre>

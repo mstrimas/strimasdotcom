@@ -5,7 +5,7 @@ date: '2020-03-24'
 slug: 'block-processing-rasters'
 categories: []
 tags:
-  - r
+  - R
   - Spatial
 subtitle: ''
 summary: 'In this post, I examine how the size of blocks impacts the efficiency of block processing raster data in R'
