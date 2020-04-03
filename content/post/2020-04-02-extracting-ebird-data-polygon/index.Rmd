@@ -9,7 +9,7 @@ tags:
   - R
   - Spatial
 subtitle: ''
-summary: 'A short post demonstrating how to use the R package auk to extract eBird data from within a Polyon or Shapefile.'
+summary: 'A short post demonstrating how to use the R package auk to extract eBird data from within a study area defined by a polyon or Shapefile.'
 authors: []
 lastmod: '2020-04-02T10:56:14-04:00'
 featured: no
