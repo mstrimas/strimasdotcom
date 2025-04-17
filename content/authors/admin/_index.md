@@ -1,7 +1,7 @@
 ---
 authors:
 - admin
-bio: I am a data scientist at the Cornell Lab of Ornithology using data from the
+bio: I am an ornithologist at the Cornell Lab of Ornithology using data from the
     citizen science project eBird to inform bird research and conservation.
 education:
   courses:
@@ -28,7 +28,7 @@ name: Matt Strimas-Mackey
 organizations:
 - name: Cornell Lab of Ornithology
   url: "https://www.birds.cornell.edu/home/"
-role: Data Scientist
+role: Ornithologist
 social:
 - icon: github
   icon_pack: fab
